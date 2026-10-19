@@ -872,16 +872,27 @@ func QueryExplore(db *sqlx.DB, query, projectRoot string, maxFiles int) (*Explor
 		// Empty query: select top nodes to populate G_DATA skeleton
 		err = db.Select(&matchedNodes, "SELECT * FROM astramap_nodes WHERE 1=1 "+nonSyntheticAnonymousNodeSQL+" ORDER BY file_path, start_line LIMIT ?", maxFiles)
 	} else {
-		ftsQuery := strings.Join(terms, " OR ")
+		// Prefix-match every term: unicode61 keeps camelCase as one token,
+		// so exact terms barely match Go/JS symbols ("resolve*" does).
+		prefixTerms := make([]string, len(terms))
+		for i, t := range terms {
+			prefixTerms[i] = t + "*"
+		}
+		ftsQuery := strings.Join(prefixTerms, " OR ")
+		// Rank a 4x bm25 candidate pool before collapsing to maxFiles files,
+		// so lexical noise cannot crowd out partial matches. Drop
+		// variable/parameter fragments; member fields (id contains '#') are
+		// real symbols and stay.
 		err = db.Select(&matchedNodes,
 			"SELECT n.* FROM astramap_nodes n "+
 				"JOIN (SELECT astramap_fts.id AS id, bm25(astramap_fts) as rank FROM astramap_fts WHERE astramap_fts MATCH ? ORDER BY rank LIMIT ?) f "+
 				"ON n.id = f.id WHERE 1=1 "+
+				"AND NOT (n.kind IN ('variable', 'parameter') AND n.id NOT LIKE '%#%') "+
 				"AND n.name NOT LIKE '$anonymous_type_%' "+
 				"AND n.qualified_name NOT LIKE '%$anonymous_type_%' "+
 				"AND n.id NOT LIKE '%$anonymous_type_%' "+
 				"ORDER BY f.rank",
-			ftsQuery, maxFiles)
+			ftsQuery, maxFiles*4)
 	}
 	if err != nil {
 		return nil, err
@@ -911,38 +922,51 @@ func QueryExplore(db *sqlx.DB, query, projectRoot string, maxFiles int) (*Explor
 	}
 
 	result := &ExploreResult{}
-	for _, fp := range fileOrder {
+	for i, fp := range fileOrder {
+		if i >= maxFiles {
+			break
+		}
 		result.Files = append(result.Files, *fileMap[fp])
 	}
 
-	// Collect caller relationships for all matched nodes
-	for _, n := range matchedNodes {
-		callers, _ := GetCallers(db, n.ID)
-		for _, c := range callers {
-			result.Relationships = append(result.Relationships,
-				CanonicalSymbolIDForNodeID(db, c.Source)+" → "+CanonicalSymbolID(n))
-		}
-		if n.Kind == "struct" || n.Kind == "class" || n.Kind == "interface" {
-			var structEdges []struct {
-				Source string `db:"source"`
-				Target string `db:"target"`
-				Kind   string `db:"kind"`
+	// Collect caller/callee relationships for retained symbols only, while
+	// node IDs are still raw (queryable); canonicalize afterwards.
+	for _, fr := range result.Files {
+		for _, n := range fr.Symbols {
+			callers, _ := GetCallers(db, n.ID)
+			for _, c := range callers {
+				result.Relationships = append(result.Relationships,
+					CanonicalSymbolIDForNodeID(db, c.Source)+" → "+CanonicalSymbolID(n))
 			}
-			err := db.Select(&structEdges, "SELECT source, target, kind FROM astramap_edges WHERE (source = ? OR target = ?) AND kind IN ('contains', 'implements')", n.ID, n.ID)
-			if err == nil {
-				for _, e := range structEdges {
-					src := CanonicalSymbolIDForNodeID(db, e.Source)
-					tgt := CanonicalSymbolIDForNodeID(db, e.Target)
-					if src != "" && tgt != "" {
-						result.Relationships = append(result.Relationships,
-							src+" "+e.Kind+" → "+tgt)
+			callees, _ := GetCalleesLimited(db, n.ID, 20)
+			for _, c := range callees {
+				result.Relationships = append(result.Relationships,
+					CanonicalSymbolID(n)+" → "+CanonicalSymbolIDForNodeID(db, c.Target))
+			}
+			if n.Kind == "struct" || n.Kind == "class" || n.Kind == "interface" {
+				var structEdges []struct {
+					Source string `db:"source"`
+					Target string `db:"target"`
+					Kind   string `db:"kind"`
+				}
+				err := db.Select(&structEdges, "SELECT source, target, kind FROM astramap_edges WHERE (source = ? OR target = ?) AND kind IN ('contains', 'implements')", n.ID, n.ID)
+				if err == nil {
+					for _, e := range structEdges {
+						src := CanonicalSymbolIDForNodeID(db, e.Source)
+						tgt := CanonicalSymbolIDForNodeID(db, e.Target)
+						if src != "" && tgt != "" {
+							result.Relationships = append(result.Relationships,
+								src+" "+e.Kind+" → "+tgt)
+						}
 					}
 				}
 			}
 		}
 	}
-	for _, n := range matchedNodes {
-		n.ID = CanonicalSymbolID(n)
+	for _, fr := range result.Files {
+		for _, n := range fr.Symbols {
+			n.ID = CanonicalSymbolID(n)
+		}
 	}
 
 	return result, nil

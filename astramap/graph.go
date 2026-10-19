@@ -74,8 +74,19 @@ func GetCallersLimited(db *sqlx.DB, symbolID string, limit int) ([]*AstraMapEdge
 
 // GetCallees finds the direct downstream callees of a specified symbol
 func GetCallees(db *sqlx.DB, symbolID string) ([]*AstraMapEdge, error) {
+	return GetCalleesLimited(db, symbolID, 0)
+}
+
+// GetCalleesLimited finds downstream callees with an optional limit (0 = unlimited)
+func GetCalleesLimited(db *sqlx.DB, symbolID string, limit int) ([]*AstraMapEdge, error) {
 	var edges []*AstraMapEdge
-	err := db.Select(&edges, "SELECT "+edgeCols+" FROM astramap_edges WHERE source = ? AND kind = 'calls'", symbolID)
+	query := "SELECT " + edgeCols + " FROM astramap_edges WHERE source = ? AND kind = 'calls' ORDER BY target, line, id"
+	args := []interface{}{symbolID}
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
+	err := db.Select(&edges, query, args...)
 	for _, edge := range edges {
 		annotateConditionalMetadata(db, edge)
 	}
