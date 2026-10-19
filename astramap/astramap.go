@@ -880,9 +880,43 @@ func estimateFunctionEndLine(lines []string, startLine int) int {
 
 	braceDepth := 0
 	seenOpenBrace := false
+	// Literal state must survive backslash line splices, else CLI syntax
+	// strings leak braces and truncate extents (firefly_l2_cli.c "l2 fdb add").
+	inString := false
+	inChar := false
+	inBlockComment := false
+	escaped := false
 	for lineNo := startLine; lineNo <= len(lines); lineNo++ {
-		line := stripLineForBraceScan(lines[lineNo-1])
-		for _, r := range line {
+		line := lines[lineNo-1]
+		for i, r := range line {
+			if inBlockComment {
+				if r == '*' && i+1 < len(line) && line[i+1] == '/' {
+					inBlockComment = false
+				}
+				continue
+			}
+			if escaped {
+				escaped = false
+				continue
+			}
+			if r == '\\' {
+				escaped = true
+				continue
+			}
+			if inString || inChar {
+				if (inString && r == '"') || (inChar && r == '\'') {
+					inString, inChar = false, false
+				}
+				continue
+			}
+			if r == '/' && i+1 < len(line) {
+				if line[i+1] == '/' {
+					break
+				}
+				if line[i+1] == '*' {
+					inBlockComment = true
+				}
+			}
 			switch r {
 			case '{':
 				braceDepth++
@@ -894,42 +928,17 @@ func estimateFunctionEndLine(lines []string, startLine int) int {
 				if seenOpenBrace && braceDepth == 0 {
 					return lineNo
 				}
+			case '"':
+				inString = true
+			case '\'':
+				inChar = true
 			}
 		}
+		// A trailing backslash splices the newline: keep literals open, never
+		// escape the next line's first rune.
+		escaped = false
 	}
 	return startLine
-}
-
-func stripLineForBraceScan(line string) string {
-	if idx := strings.Index(line, "//"); idx >= 0 {
-		line = line[:idx]
-	}
-	var b strings.Builder
-	inString := false
-	inChar := false
-	escaped := false
-	for _, r := range line {
-		if escaped {
-			escaped = false
-			continue
-		}
-		if r == '\\' {
-			escaped = true
-			continue
-		}
-		if r == '"' && !inChar {
-			inString = !inString
-			continue
-		}
-		if r == '\'' && !inString {
-			inChar = !inChar
-			continue
-		}
-		if !inString && !inChar {
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
 }
 
 // SyncAllFilesAstraMap scans the project directory, incrementally syncing all dirty files
