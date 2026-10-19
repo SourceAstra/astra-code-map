@@ -20,10 +20,10 @@ set -euo pipefail
 #   ./publish.sh [VERSION] [COMMIT_MESSAGE] [--all]
 #
 # Examples:
-#   ./publish.sh v0.2.0 "release: official release v0.2.0"
-#   ./publish.sh v0.2.0 "release: official release v0.2.0" --all
+#   ./publish.sh v0.2.1 "release: official release v0.2.1"
+#   ./publish.sh v0.2.1 "release: official release v0.2.1" --all
 
-VERSION="v0.2.0"
+VERSION="v0.2.1"
 COMMIT_MSG=""
 BUILD_ALL=false
 
