@@ -2,9 +2,9 @@
 
 ## 项目结构
 
-- `astramap/`：核心 Go 实现，包括索引、Tree-sitter 解析、调用图、MCP 服务和 HTTP 服务。
+- `core/`：核心 Go 实现（package core），包括索引、Tree-sitter 解析、调用图、MCP 服务和 HTTP 服务。
 - `cmd/amap/`：命令行入口，提供 `index`、`dashboard`、`serve` 等命令。
-- `astramap/web/`：Dashboard 的 HTML、CSS 和 JavaScript 前端资源。
+- `core/web/`：Dashboard 的 HTML、CSS 和 JavaScript 前端资源。
 - `docs/`：设计文档和项目说明；`README.md`、`QUICKSTART.md` 提供用户级使用文档。
 - `.astramap/`：本地代码地图数据库和索引状态，不应提交生成数据。
 

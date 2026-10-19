@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package astramap
+package core
 
 import (
 	"crypto/sha256"

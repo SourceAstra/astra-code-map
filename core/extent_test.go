@@ -1,4 +1,4 @@
-package astramap
+package core
 
 import "testing"
 

@@ -21,7 +21,7 @@ import (
 	"os"
 	"strings"
 
-	"astramap-standalone/astramap"
+	"astramap-standalone/core"
 )
 
 func syntaxCmd() {
@@ -40,7 +40,7 @@ func syntaxCmd() {
 	if *scope != "user" && *scope != "project" {
 		syntaxExit(fmt.Errorf("invalid syntax overlay scope: %s", *scope))
 	}
-	options := astramap.LanguageInstallOptions{
+	options := core.LanguageInstallOptions{
 		ProjectRoot: projectRoot, ProjectScope: *scope == "project", AllowUnsigned: *allowUnsigned,
 		TrustKeyPath: *trustKey, CatalogURL: *catalog,
 	}
@@ -48,19 +48,19 @@ func syntaxCmd() {
 	switch action {
 	case "install", "update":
 		requireSyntaxArgs(action, args, 1)
-		info, err := astramap.InstallLanguagePackage(args[0], options)
+		info, err := core.InstallLanguagePackage(args[0], options)
 		syntaxResult(info, err, *jsonOutput)
 	case "enable":
 		requireSyntaxArgs(action, args, 2)
-		syntaxExit(astramap.EnableLanguagePackage(args[0], args[1], options))
+		syntaxExit(core.EnableLanguagePackage(args[0], args[1], options))
 	case "disable":
 		requireSyntaxArgs(action, args, 1)
-		syntaxExit(astramap.DisableLanguagePackage(args[0], options))
+		syntaxExit(core.DisableLanguagePackage(args[0], options))
 	case "remove":
 		requireSyntaxArgs(action, args, 2)
-		syntaxExit(astramap.RemoveLanguagePackage(args[0], args[1], options))
+		syntaxExit(core.RemoveLanguagePackage(args[0], args[1], options))
 	case "list":
-		packages, err := astramap.ListLanguagePackages(options)
+		packages, err := core.ListLanguagePackages(options)
 		if err != nil {
 			syntaxExit(err)
 		}
@@ -82,7 +82,7 @@ func syntaxCmd() {
 		}
 	case "doctor":
 		requireSyntaxArgs(action, args, 1)
-		if err := astramap.DiagnoseLanguagePackage(args[0], options); err != nil {
+		if err := core.DiagnoseLanguagePackage(args[0], options); err != nil {
 			syntaxExit(err)
 		}
 		fmt.Printf("Syntax overlay %s is valid and its worker handshake succeeded\n", args[0])
@@ -102,7 +102,7 @@ func requireSyntaxArgs(action string, args []string, count int) {
 	os.Exit(2)
 }
 
-func syntaxResult(info astramap.LanguagePackageInfo, err error, jsonOutput bool) {
+func syntaxResult(info core.LanguagePackageInfo, err error, jsonOutput bool) {
 	if err != nil {
 		syntaxExit(err)
 	}
