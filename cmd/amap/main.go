@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/pprof"
 	"sort"
 	"strconv"
 	"strings"
@@ -66,6 +67,29 @@ func getAstraMapDB(projectRoot string) (*sqlx.DB, error) {
 		return nil, err
 	}
 	return db, nil
+}
+
+// startHangWatchdog guards the post-SCIP indexing phase against SQLite driver
+// deadlocks: without it a stalled run parks on futex forever while holding the
+// database write lock, hanging every later amap command on the same project.
+func startHangWatchdog(projectRoot string, stall time.Duration) func() {
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-done:
+			return
+		case <-time.After(stall):
+			dumpPath := filepath.Join(projectRoot, ".astramap", "hang-dump.txt")
+			_ = os.MkdirAll(filepath.Dir(dumpPath), 0o755)
+			if f, err := os.Create(dumpPath); err == nil {
+				_ = pprof.Lookup("goroutine").WriteTo(f, 2)
+				_ = f.Close()
+			}
+			logError("indexing stalled for %s (possible SQLite driver deadlock); goroutine dump written to %s; exiting", stall, dumpPath)
+			os.Exit(1)
+		}
+	}()
+	return func() { close(done) }
 }
 
 // projectRoot holds the resolved --project path.
@@ -1426,6 +1450,8 @@ func runIndex(opts indexOptions) {
 		fmt.Println("Existing SCIP index detected, skipping full SCIP refresh. Use --refresh-scip to force refresh.")
 	}
 
+	// The watchdog must stop before the --watch loop: watch mode idles on purpose.
+	stopWatchdog := startHangWatchdog(projectRoot, 10*time.Minute)
 	if len(scipPaths) > 0 {
 		if err := validateScipSelection(scipPaths, selected); err != nil {
 			cleanupOwnedFiles(scipAutoPaths)
@@ -1477,6 +1503,7 @@ func runIndex(opts indexOptions) {
 		fmt.Printf("  Nodes (by language): %s\n", formatLangStats(nodeStats))
 		fmt.Printf("  Edges (by source): %s\n", formatProvStats(edgeStats))
 	}
+	stopWatchdog()
 
 	if opts.watch {
 		if opts.watchInterval < time.Second {
@@ -2578,7 +2605,7 @@ func printConfigs(amapPath, projectPath string) {
 		"mcpServers": map[string]interface{}{
 			"astramap": map[string]interface{}{
 				"command": amapPath,
-				"args":    []string{"serve", "--project", projectPath},
+				"args":    []string{"serve", "--project", "."},
 			},
 		},
 	}
@@ -2590,18 +2617,18 @@ func printConfigs(amapPath, projectPath string) {
 func installAntigravity(amapPath, projectPath string) bool {
 	mcpMethods := []string{}
 
-	// 1. 项目级 .agents/mcp_config.json
+	// 1. 项目级 .agents/mcp_config.json (使用相对路径 .，避免硬编码物理绝对路径)
 	projMcpPath := filepath.Join(projectPath, ".agents", "mcp_config.json")
 	if err := writeMcpConfig(projMcpPath, "mcpServers", "astramap", map[string]interface{}{
 		"command": amapPath,
-		"args":    []string{"serve", "--project", projectPath},
+		"args":    []string{"serve", "--project", "."},
 	}); err != nil {
 		logWarn("Project-level Antigravity MCP registration failed (%s): %v", projMcpPath, err)
 	} else {
 		mcpMethods = append(mcpMethods, ".agents/mcp_config.json")
 	}
 
-	// 2. 全局级 ~/.gemini/config/mcp_config.json 和 ~/.gemini/antigravity-cli/mcp_config.json
+	// 2. 全局级 ~/.gemini/config/mcp_config.json 和 ~/.gemini/antigravity-cli/mcp_config.json (不传 --project，自适应当前工作区 CWD)
 	home, err := os.UserHomeDir()
 	if err == nil {
 		globalMcpPath1 := filepath.Join(home, ".gemini", "config", "mcp_config.json")
@@ -2610,7 +2637,7 @@ func installAntigravity(amapPath, projectPath string) bool {
 		// Write globalMcpPath1
 		if err := writeMcpConfig(globalMcpPath1, "mcpServers", "astramap", map[string]interface{}{
 			"command": amapPath,
-			"args":    []string{"serve", "--project", projectPath},
+			"args":    []string{"serve"},
 		}); err != nil {
 			logWarn("Global-level Antigravity MCP registration failed (%s): %v", globalMcpPath1, err)
 		} else {
@@ -2620,7 +2647,7 @@ func installAntigravity(amapPath, projectPath string) bool {
 		// Write globalMcpPath2
 		if err := writeMcpConfig(globalMcpPath2, "mcpServers", "astramap", map[string]interface{}{
 			"command": amapPath,
-			"args":    []string{"serve", "--project", projectPath},
+			"args":    []string{"serve"},
 		}); err != nil {
 			logWarn("Global-level Antigravity CLI MCP registration failed (%s): %v", globalMcpPath2, err)
 		} else {
@@ -2887,22 +2914,22 @@ User Input: $ARGUMENTS
 const astramapRulesContent = `AstraMap 是当前项目的代码地图 MCP 服务，采用 SCIP 编译器级精确语义（主）+ Tree-sitter 实时语法层（辅）的双层架构。
 
 【AI Agent 强制工具调度协议】：
-在进行任何代码阅读、重构、Bug 修复、符号查找或影响评估时，必须强制遵守以下工具选择策略：
+在进行任何代码阅读、重构、Bug 修复、符号查找或影响评估时，必须强制遵守以下工具选择策略（AstraMap 为 MCP 服务，必须通过 ` + "`" + `call_mcp_tool(ServerName="astramap", ToolName=...)` + "`" + ` 严格调度，严禁降级使用 ` + "`" + `grep_search` + "`" + ` 替代代码分析）：
 
-1. 严禁盲目 Grep：查找类名、函数名、结构体、接口定义时，【严禁】首选全文 grep / view_file。必须优先调用 astramap_search 或 astramap_explore。
-2. 架构与调用链分析：追溯调用关系（Who calls what）或追踪 A 到 B 的路径时，【必须】使用 astramap_callers / astramap_callees / astramap_trace。
-3. 修改影响评估：修改任何公共函数、结构体或接口前，【必须】先执行 astramap_impact 评估受影响范围。
+1. 严禁盲目 Grep：查找类名、函数名、结构体、接口定义时，【严禁】首选全文 grep / view_file。必须优先调用 ` + "`" + `call_mcp_tool(ServerName="astramap", ToolName="astramap_search")` + "`" + ` 或 ` + "`" + `astramap_explore` + "`" + `。
+2. 架构与调用链分析：追溯调用关系（Who calls what）或追踪 A 到 B 的路径时，【必须】使用 ` + "`" + `astramap_callers` + "`" + ` / ` + "`" + `astramap_callees` + "`" + ` / ` + "`" + `astramap_trace` + "`" + `。
+3. 修改影响评估：修改任何公共函数、结构体或接口前，【必须】先执行 ` + "`" + `astramap_impact` + "`" + ` 评估受影响范围。
 4. 只有在检索非代码符号（如日志文本、注释、配置键名）时，才允许使用常规 grep。
 
-工具路由表：
-- 查找符号定义/函数/类 → astramap_search
-- 聚合查看上下文与代码关系 → astramap_explore
-- 查看指定符号详情与源码 → astramap_node
-- 追溯调用方 (Callers) → astramap_callers
-- 追溯被调用方 (Callees) → astramap_callees
-- 评估修改破坏范围 → astramap_impact
-- 追踪 A 到 B 的调用路径 → astramap_trace
-- 检查索引健康度与语言支持 → astramap_status
+工具路由表（统一走 call_mcp_tool(ServerName="astramap", ToolName=...)）：
+- 查找符号定义/函数/类 → ToolName: ` + "`" + `astramap_search` + "`" + `
+- 聚合查看上下文与代码关系 → ToolName: ` + "`" + `astramap_explore` + "`" + `
+- 查看指定符号详情与源码 → ToolName: ` + "`" + `astramap_node` + "`" + `
+- 追溯调用方 (Callers) → ToolName: ` + "`" + `astramap_callers` + "`" + `
+- 追溯被调用方 (Callees) → ToolName: ` + "`" + `astramap_callees` + "`" + `
+- 评估修改破坏范围 → ToolName: ` + "`" + `astramap_impact` + "`" + `
+- 追踪 A 到 B 的调用路径 → ToolName: ` + "`" + `astramap_trace` + "`" + `
+- 检查索引健康度与语言支持 → ToolName: ` + "`" + `astramap_status` + "`" + `
 `
 
 // installVSCode 注册到 VS Code (MCP server + Copilot instructions)
